@@ -1,11 +1,11 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -16,79 +16,93 @@ type (
 		Api      string
 		Conteudo DadosCep
 	}
-
-	CanalResposta chan RespostaApi
 )
 
 func (r RespostaApi) String() string {
-	return fmt.Sprintf("Recebido da Api: %s, o seguinte conteudo: %+v", r.Api, r.Conteudo)
+	return fmt.Sprintf("Resposta da Api: %s, com o seguinte conteudo: %+v\n", r.Api, r.Conteudo)
 }
 
 func main() {
-	tempoResposta := 100 * time.Second
 	cep := "01153000"
+	listaApi := []string{
+		"https://brasilapi.com.br/api/cep/v1/" + cep,
+		"http://viacep.com.br/ws/" + cep + "/json/",
+	}
 
-	canalRespostaApi1 := make(CanalResposta)
-	canalRespostaApi2 := make(CanalResposta)
+	// Cria um canal para os resultados
+	canalRespostaApi := make(chan RespostaApi)
 
-	ctx, cancelarReqisicao := context.WithTimeout(context.Background(), tempoResposta)
-	defer cancelarReqisicao()
+	// Cria um WaitGroup para esperar todas as goroutines terminarem
+	wg := sync.WaitGroup{}
 
+	// Define o número de goroutines de acordo com a lista de API's
+	wg.Add(len(listaApi))
+
+	// Inicia as goroutines
+	for _, urlApi := range listaApi {
+		go obterDadosApiCep(urlApi, &wg, canalRespostaApi)
+	}
+
+	// Cria uma goroutine anônima para fechar o canal quando todas as outras goroutines terminarem
 	go func() {
-		dadosCep, erro := obterDadosCep(ctx, "https://brasilapi.com.br/api/cep/v1/"+cep)
-		if erro != nil {
-			panic(erro)
-		}
-
-		canalRespostaApi1 <- RespostaApi{
-			Api:      "brasilapi",
-			Conteudo: dadosCep,
-		}
-
+		wg.Wait()
+		close(canalRespostaApi)
 	}()
 
-	go func() {
-		dadosCep, erro := obterDadosCep(ctx, "http://viacep.com.br/ws/"+cep+"/json/")
-		if erro != nil {
-			panic(erro)
-		}
+	// Define um temporizador para 1 segundo
+	tempoEspera := time.After(1 * time.Second)
 
-		canalRespostaApi2 <- RespostaApi{
-			Api:      "viacep",
-			Conteudo: dadosCep,
-		}
-	}()
-
-	for i := 0; i < 2; i++ {
-		select {
-		case respostaApi1 := <-canalRespostaApi1:
-			fmt.Println(respostaApi1.String())
-		case respostaApi2 := <-canalRespostaApi2:
-			fmt.Println(respostaApi2.String())
-		}
+	// Agora, use select para aguardar o resultado ou o timeout
+	select {
+	case respostaApi := <-canalRespostaApi:
+		fmt.Println(respostaApi.String())
+	case <-tempoEspera:
+		fmt.Println("Erro: Timeout atingido")
 	}
 
 }
 
-func obterDadosCep(contexto context.Context, url string) (dadosCep DadosCep, erro error) {
+func obterDadosApiCep(url string, wg *sync.WaitGroup, canalResultado chan RespostaApi) {
+	defer wg.Done()
 
-	requisicao, erro := http.NewRequestWithContext(contexto, http.MethodGet, url, nil)
-	if erro != nil {
-		return nil, erro
-	}
+	// Simula timeout
+	// time.Sleep(1 * time.Second)
 
-	resposta, erro := http.DefaultClient.Do(requisicao)
+	resposta, erro := http.Get(url)
 	if erro != nil {
-		return nil, erro
+		// Envia o resultado para o canal
+		conteudo := map[string]any{"erro": erro.Error()}
+		canalResultado <- RespostaApi{
+			Api:      url,
+			Conteudo: conteudo,
+		}
 	}
 	defer resposta.Body.Close()
 
 	conteudoResposta, erro := io.ReadAll(resposta.Body)
 	if erro != nil {
-		return nil, erro
+		// Envia o resultado para o canal
+		conteudo := map[string]any{"erro": erro.Error()}
+		canalResultado <- RespostaApi{
+			Api:      url,
+			Conteudo: conteudo,
+		}
 	}
 
-	json.Unmarshal(conteudoResposta, &dadosCep)
+	var dadosCep DadosCep
+	if erro := json.Unmarshal(conteudoResposta, &dadosCep); erro != nil {
+		// Envia o resultado para o canal
+		conteudo := map[string]any{"erro": erro.Error()}
+		canalResultado <- RespostaApi{
+			Api:      url,
+			Conteudo: conteudo,
+		}
+	}
 
-	return dadosCep, nil
+	// Envia o resultado para o canal
+	canalResultado <- RespostaApi{
+		Api:      url,
+		Conteudo: dadosCep,
+	}
+
 }
